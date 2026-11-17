@@ -816,9 +816,17 @@ impl Signer<Signature> for EcdsaKeypair {
             }
             #[cfg(all(feature = "p256", not(feature = "openssl")))]
             Self::NistP256 { private, .. } => private.try_sign(message),
-            #[cfg(feature = "p384")]
+            #[cfg(feature = "openssl")]
+            Self::NistP384 { private, public } => {
+                openssl_ecdsa::sign(Nid::SECP384R1, private.as_slice(), public.as_bytes(), message, EcdsaCurve::NistP384)
+            }
+            #[cfg(all(feature = "p384", not(feature = "openssl")))]
             Self::NistP384 { private, .. } => private.try_sign(message),
-            #[cfg(feature = "p521")]
+            #[cfg(feature = "openssl")]
+            Self::NistP521 { private, public } => {
+                openssl_ecdsa::sign(Nid::SECP521R1, private.as_slice(), public.as_bytes(), message, EcdsaCurve::NistP521)
+            }
+            #[cfg(all(feature = "p521", not(feature = "openssl")))]
             Self::NistP521 { private, .. } => private.try_sign(message),
             #[allow(unreachable_patterns)]
             _ => Err(self.algorithm().unsupported_error().into()),
@@ -846,14 +854,30 @@ impl Verifier<Signature> for EcdsaPublicKey {
                     verifying_key.verify(message, &signature)
                 }
 
-                #[cfg(feature = "p384")]
+                #[cfg(feature = "openssl")]
+                EcdsaCurve::NistP384 => {
+                    let Self::NistP384(point) = self else {
+                        return Err(signature.algorithm().unsupported_error().into());
+                    };
+                    openssl_ecdsa::verify(Nid::SECP384R1, point.as_bytes(), message, signature)
+                }
+
+                #[cfg(all(feature = "p384", not(feature = "openssl")))]
                 EcdsaCurve::NistP384 => {
                     let verifying_key = p384::ecdsa::VerifyingKey::try_from(self)?;
                     let signature = p384::ecdsa::Signature::try_from(signature)?;
                     verifying_key.verify(message, &signature)
                 }
 
-                #[cfg(feature = "p521")]
+                #[cfg(feature = "openssl")]
+                EcdsaCurve::NistP521 => {
+                    let Self::NistP521(point) = self else {
+                        return Err(signature.algorithm().unsupported_error().into());
+                    };
+                    openssl_ecdsa::verify(Nid::SECP521R1, point.as_bytes(), message, signature)
+                }
+
+                #[cfg(all(feature = "p521", not(feature = "openssl")))]
                 EcdsaCurve::NistP521 => {
                     let verifying_key = p521::ecdsa::VerifyingKey::try_from(self)?;
                     let signature = p521::ecdsa::Signature::try_from(signature)?;
@@ -1209,6 +1233,58 @@ mod tests {
         };
         assert!(
             EcdsaPublicKey::NistP256(*public)
+                .verify(EXAMPLE_MSG, &signature)
+                .is_ok()
+        );
+    }
+
+    /// Same approach as `sign_and_verify_ecdsa_p256_openssl`, for NIST P-384
+    /// (`openssl ecparam -name secp384r1 -genkey -noout`).
+    #[cfg(feature = "openssl")]
+    #[test]
+    fn sign_and_verify_ecdsa_p384_openssl() {
+        let private: EcdsaPrivateKey<48> = hex!(
+            "d1aec9b3e69d23062f6aa650a1a756c9e1c618a2980d4cc44103e2845003070c22d3ded47a91ce316ef190308c9d07e7"
+        )
+        .into();
+        let public = sec1::EncodedPoint::from_bytes(hex!(
+            "04399a53850a1c24817b1862f679611094ad26a98830891b9506a050aa081e0df1889127d25eb40673af56bd7d72dbae397eb5dba88d16e00f7c6119b22da129e3d378538f53cd0753c6ea4a5f734fd77733a154a51ac01bdaa33ed436532ddfcf"
+        ))
+        .unwrap();
+        let keypair = EcdsaKeypair::NistP384 { private, public };
+
+        let signature = keypair.try_sign(EXAMPLE_MSG).unwrap();
+        let EcdsaKeypair::NistP384 { public, .. } = &keypair else {
+            unreachable!()
+        };
+        assert!(
+            EcdsaPublicKey::NistP384(*public)
+                .verify(EXAMPLE_MSG, &signature)
+                .is_ok()
+        );
+    }
+
+    /// Same approach as `sign_and_verify_ecdsa_p256_openssl`, for NIST P-521
+    /// (`openssl ecparam -name secp521r1 -genkey -noout`).
+    #[cfg(feature = "openssl")]
+    #[test]
+    fn sign_and_verify_ecdsa_p521_openssl() {
+        let private: EcdsaPrivateKey<66> = hex!(
+            "00de13074e2a6e9bf5cc87aacd3dd97f22899f2d1fa2b61530050a4ab78af82e4122384c63f2b91128dedf3ef05a412215ad6f040286b84726eb0d6e600bc1cbe8a8"
+        )
+        .into();
+        let public = sec1::EncodedPoint::from_bytes(hex!(
+            "04019ceef1534cac5fbd2c90e6e6350bf3d1682c97344f570b80502a501e8cb1d304da4eed15922ed64ee28c4b9090bf15e7d8b406e4f189af12dd739ed6f67f543c4300ca1167fcdc702a323be5f2e16f72a47a4f3a85f3f5f2140d6c51039c0c22d65104f01436a7ca359a554b2dbea5cbaf265027795cc93a400c7a84361b26a44c050a"
+        ))
+        .unwrap();
+        let keypair = EcdsaKeypair::NistP521 { private, public };
+
+        let signature = keypair.try_sign(EXAMPLE_MSG).unwrap();
+        let EcdsaKeypair::NistP521 { public, .. } = &keypair else {
+            unreachable!()
+        };
+        assert!(
+            EcdsaPublicKey::NistP521(*public)
                 .verify(EXAMPLE_MSG, &signature)
                 .is_ok()
         );

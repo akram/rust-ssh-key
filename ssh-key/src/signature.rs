@@ -27,16 +27,23 @@ use crate::{private::EcdsaKeypair, public::EcdsaPublicKey};
 #[cfg(any(feature = "p256", feature = "p384", feature = "p521"))]
 use crate::private::EcdsaPrivateKey;
 
-#[cfg(feature = "rsa")]
-use {
-    crate::{HashAlg, private::RsaKeypair, public::RsaPublicKey},
-    sha2::Sha512,
-};
+#[cfg(any(feature = "rsa", feature = "openssl"))]
+use crate::{HashAlg, private::RsaKeypair, public::RsaPublicKey};
 
-#[cfg(any(all(feature = "sha1", feature = "rsa"), feature = "dsa"))]
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+use sha2::Sha512;
+
+#[cfg(any(
+    all(feature = "sha1", feature = "rsa", not(feature = "openssl")),
+    feature = "dsa"
+))]
 use sha1::Sha1;
 
-#[cfg(any(feature = "ed25519", feature = "rsa", feature = "p256"))]
+#[cfg(any(
+    feature = "ed25519",
+    feature = "p256",
+    all(feature = "rsa", not(feature = "openssl"))
+))]
 use sha2::Sha256;
 
 #[cfg(any(feature = "dsa", feature = "ed25519", feature = "p256"))]
@@ -656,6 +663,109 @@ mod openssl_ecdsa {
     }
 }
 
+// OpenSSL-backed RSA (PKCS#1 v1.5) sign/verify, as an alternative to the
+// `rsa` crate's implementation when the `openssl` feature is selected.
+// Unlike Ed25519/ECDSA this reuses `openssl::sign::Signer`/`Verifier`
+// directly: RSA PKCS#1 v1.5 is OpenSSL's default signature scheme for an
+// RSA key, so the output already matches the raw-bytes wire encoding the
+// `rsa` crate path also produces (no DER re-encoding needed, unlike ECDSA).
+#[cfg(feature = "openssl")]
+mod openssl_rsa {
+    use super::{Algorithm, HashAlg, Mpint, Signature};
+    use alloc::vec::Vec;
+    use openssl::bn::{BigNum, BigNumContext, BigNumRef};
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+
+    fn message_digest(hash: Option<HashAlg>) -> signature::Result<MessageDigest> {
+        match hash {
+            Some(HashAlg::Sha256) => Ok(MessageDigest::sha256()),
+            Some(HashAlg::Sha512) => Ok(MessageDigest::sha512()),
+            #[cfg(feature = "sha1")]
+            None => Ok(MessageDigest::sha1()),
+            #[cfg(not(feature = "sha1"))]
+            None => Err(Algorithm::Rsa { hash: None }.unsupported_error().into()),
+        }
+    }
+
+    fn bn(mpint: &Mpint) -> signature::Result<BigNum> {
+        BigNum::from_slice(mpint.as_positive_bytes().ok_or_else(signature::Error::new)?)
+            .map_err(signature::Error::from_source)
+    }
+
+    /// RSA CRT exponents (`dp`, `dq`), not stored by `ssh_key::private::RsaPrivateKey`
+    /// but required by OpenSSL's private-key constructor; derived from `d`, `p`, `q`
+    /// the same way the (now-superseded) `russh-keys` OpenSSL backend did.
+    fn calc_dp_dq(d: &BigNumRef, p: &BigNumRef, q: &BigNumRef) -> signature::Result<(BigNum, BigNum)> {
+        let one = BigNum::from_u32(1).map_err(signature::Error::from_source)?;
+        let p1 = p - one.as_ref();
+        let q1 = q - one.as_ref();
+        let mut ctx = BigNumContext::new().map_err(signature::Error::from_source)?;
+        let mut dp = BigNum::new().map_err(signature::Error::from_source)?;
+        let mut dq = BigNum::new().map_err(signature::Error::from_source)?;
+        dp.checked_rem(d, &p1, &mut ctx)
+            .map_err(signature::Error::from_source)?;
+        dq.checked_rem(d, &q1, &mut ctx)
+            .map_err(signature::Error::from_source)?;
+        Ok((dp, dq))
+    }
+
+    pub(super) fn sign(
+        keypair: &super::RsaKeypair,
+        hash: Option<HashAlg>,
+        message: &[u8],
+    ) -> signature::Result<Signature> {
+        let n = bn(keypair.public().n())?;
+        let e = bn(keypair.public().e())?;
+        let d = bn(keypair.private().d())?;
+        let p = bn(keypair.private().p())?;
+        let q = bn(keypair.private().q())?;
+        let iqmp = bn(keypair.private().iqmp())?;
+        let (dp, dq) = calc_dp_dq(&d, &p, &q)?;
+
+        let rsa = Rsa::from_private_components(n, e, d, p, q, dp, dq, iqmp)
+            .map_err(signature::Error::from_source)?;
+        let pkey = PKey::from_rsa(rsa).map_err(signature::Error::from_source)?;
+
+        let md = message_digest(hash)?;
+        let mut signer =
+            openssl::sign::Signer::new(md, &pkey).map_err(signature::Error::from_source)?;
+        let data: Vec<u8> = signer
+            .sign_oneshot_to_vec(message)
+            .map_err(signature::Error::from_source)?;
+
+        Ok(Signature {
+            algorithm: Algorithm::Rsa { hash },
+            data,
+        })
+    }
+
+    pub(super) fn verify(
+        public: &super::RsaPublicKey,
+        hash: Option<HashAlg>,
+        message: &[u8],
+        signature: &Signature,
+    ) -> signature::Result<()> {
+        let n = bn(public.n())?;
+        let e = bn(public.e())?;
+        let rsa = Rsa::from_public_components(n, e).map_err(signature::Error::from_source)?;
+        let pkey = PKey::from_rsa(rsa).map_err(signature::Error::from_source)?;
+
+        let md = message_digest(hash)?;
+        let mut verifier =
+            openssl::sign::Verifier::new(md, &pkey).map_err(signature::Error::from_source)?;
+        let ok = verifier
+            .verify_oneshot(signature.as_bytes(), message)
+            .map_err(signature::Error::from_source)?;
+        if ok {
+            Ok(())
+        } else {
+            Err(signature::Error::new())
+        }
+    }
+}
+
 macro_rules! impl_signature_for_curve {
     ($krate:ident, $feature:expr, $curve:ident, $size:expr) => {
         #[cfg(feature = $feature)]
@@ -892,7 +1002,14 @@ impl Verifier<Signature> for EcdsaPublicKey {
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(feature = "openssl")]
+impl Signer<Signature> for (&RsaKeypair, Option<HashAlg>) {
+    fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
+        openssl_rsa::sign(self.0, self.1, message)
+    }
+}
+
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 impl Signer<Signature> for (&RsaKeypair, Option<HashAlg>) {
     fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
         let data = match self.1 {
@@ -916,14 +1033,24 @@ impl Signer<Signature> for (&RsaKeypair, Option<HashAlg>) {
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(any(feature = "rsa", feature = "openssl"))]
 impl Signer<Signature> for RsaKeypair {
     fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
         (self, Some(HashAlg::Sha512)).try_sign(message)
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(feature = "openssl")]
+impl Verifier<Signature> for RsaPublicKey {
+    fn verify(&self, message: &[u8], signature: &Signature) -> signature::Result<()> {
+        match signature.algorithm {
+            Algorithm::Rsa { hash } => openssl_rsa::verify(self, hash, message, signature),
+            _ => Err(signature.algorithm().unsupported_error().into()),
+        }
+    }
+}
+
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 impl Verifier<Signature> for RsaPublicKey {
     fn verify(&self, message: &[u8], signature: &Signature) -> signature::Result<()> {
         match signature.algorithm {
@@ -964,12 +1091,19 @@ mod tests {
     use {super::Ed25519Keypair, signature::Signer};
 
     #[cfg(feature = "p256")]
-    use super::{Mpint, zero_pad_field_bytes};
+    use super::zero_pad_field_bytes;
+    #[cfg(any(feature = "p256", feature = "openssl"))]
+    use super::Mpint;
 
     #[cfg(feature = "openssl")]
     use super::{EcdsaKeypair, EcdsaPublicKey};
     #[cfg(feature = "openssl")]
     use crate::private::EcdsaPrivateKey;
+
+    #[cfg(feature = "openssl")]
+    use super::{RsaKeypair, RsaPublicKey};
+    #[cfg(feature = "openssl")]
+    use crate::private::RsaPrivateKey;
 
     const DSA_SIGNATURE: &[u8] = &hex!(
         "000000077373682d6473730000002866725bf3c56100e975e21fff28a60f73717534d285ea3e1beefc2891f7189d00bd4d94627e84c55c"
@@ -1288,6 +1422,38 @@ mod tests {
                 .verify(EXAMPLE_MSG, &signature)
                 .is_ok()
         );
+    }
+
+    /// A real RSA-2048 keypair generated with the system `openssl` CLI
+    /// (`openssl genrsa 2048`), same approach as the EC openssl tests above.
+    #[cfg(feature = "openssl")]
+    #[test]
+    fn sign_and_verify_rsa_openssl() {
+        let n = Mpint::from_positive_bytes(&hex!(
+            "00b58f9674f253093f0f764b5ce4661127d68e8651fce3bf77380e7f6b0b06b259a7fc4ba701cec3b79044527721099b706853a405a5cbb4e13b4c24e367a12b7abd8faeb721b7b1265aa6b9e02a0a9721f8a21992e85d3290c6fb2da925b7efa033130224f41c44487f11f35097b872d392ae275af265750577e89b0d9859e6076ac4d74aaa1ad71c944e1896bab2a38985ba8cd8b5476a7dd97536cec82d3b2261ca3d684363ef803a53ae159e24e1f57fa14566ef3e5c438a1742e5b3a15b594dea7529bf7b3273c2c9007b17822c9d664b0af98f84f6e7ddf6738f5ccdf85722b185972e4f07bf15a6fe028551a63799630d4719b51547c2262f25e5ef403d"
+        ));
+        let e = Mpint::from_positive_bytes(&hex!("010001"));
+        let public = RsaPublicKey::new(e, n).unwrap();
+
+        let d = Mpint::from_positive_bytes(&hex!(
+            "05c3de722e33a6ca82d22dc87054315d4379d9180760aff6b827f5b1cf72d1fcf8d1911167844a40aceb0e774bec432c4993c6548b943155298ddc6a002364ff0bbfe13b5d6db8c94ffd954f61e65e302cf5f0bbf276eb211fc0600dcbedd04514fa188a55da03ed0d63e386fe9a53c316184395a6b6c4057d6e3c662d1d45a98eefd6863820e7077afd87486acd79c46cafac71e1ee27f7171ff01756ff77cfc5af3b1e18bb68c11de5cd6f6eed1fee9eb1b313468b54ad7d848079112b12241e9f0f598fab8cafd7f4de6ecd2581bb1eef4110ed61d610f7a7121a01ef59114be1236c882d46418dbb627c65f00a33976ececa7f25e53eb2b227b311d2cb21"
+        ));
+        let iqmp = Mpint::from_positive_bytes(&hex!(
+            "4401fb77f1c6b7d1fff7891753c62c8eadb8e939262fe5a43f7cc376f29c1461f14462027e67d77f739130418ca3b6228a166e798dc2aad4420fa7d21d1c71df2ecf6180cd88557852345eebb27a5ada86a74799540c359c6f0063384feb7fa2f02b2bb360f0323c516a1d02653f77e03159737257d49b1123e3a14af23c0b1f"
+        ));
+        let p = Mpint::from_positive_bytes(&hex!(
+            "00db2c74a427c7098aa3700e45a01ff1b261bf9f25b16a1123393bd9262abde92988c08412a0700fa0e77fb152b2e592fcf181cc25054cb7aa122bb40fccdf4a439cedd455c3417b0cbd58944336d9a92b01c5a43bd6c5cc1ccc29052b3e0926d90e91cf02c0db2e3ffdf4fb78cc2095979253e6b22211fcab6dddeb406206cae9"
+        ));
+        let q = Mpint::from_positive_bytes(&hex!(
+            "00d411414e399bdf3ccf67c95ebf8d94b28c690367ae9bcb1d7997d123603214adfdf1640afbb5915282d09ffa1c04470194d98141b6f0a1ab4830b1f2dacef20f91d75b7e1dcbb1d179b9f080c17f31cf10f226226b0752cc5594a0929dcd6de4501a62d861e9a5ba247f2d4079c89b10c1c044ce8c124180a8524dd555ea8e35"
+        ));
+        let private = RsaPrivateKey::new(d, iqmp, p, q).unwrap();
+        let keypair = RsaKeypair::new(public, private).unwrap();
+
+        for hash in [Some(HashAlg::Sha256), Some(HashAlg::Sha512)] {
+            let signature = (&keypair, hash).try_sign(EXAMPLE_MSG).unwrap();
+            assert!(keypair.public().verify(EXAMPLE_MSG, &signature).is_ok());
+        }
     }
 
     #[test]

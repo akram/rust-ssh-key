@@ -64,11 +64,13 @@ encryption = [
     "rand_core"
 ]
 getrandom = ["cipher/getrandom", "rand_core"]
-# Sign/verify Ed25519 via system OpenSSL (openssl-sys) instead of ed25519-dalek,
-# for environments that require all cryptographic operations to go through a
-# FIPS-certifiable OpenSSL build. Still requires the `ed25519` feature (for the
-# key storage/encoding types); this only swaps the signing/verification backend.
-openssl = ["dep:openssl", "std"]
+# Sign/verify Ed25519, ECDSA (P-256/P-384/P-521) and RSA via system OpenSSL
+# (openssl-sys) instead of ed25519-dalek/p256/p384/p521/rsa, for environments
+# that require all cryptographic operations to go through a FIPS-certifiable
+# OpenSSL build. Pulls in `ecdsa` for the EcdsaKeypair/EcdsaPublicKey types
+# (Ed25519's and RSA's equivalents are not feature-gated); this only swaps
+# the signing/verification backend, not key storage/encoding.
+openssl = ["dep:openssl", "std", "ecdsa"]
 p256 = ["dep:p256", "ecdsa"]
 p384 = ["dep:p384", "ecdsa"]
 p521 = ["dep:p521", "ecdsa"]

@@ -12,6 +12,9 @@ use crate::{private::Ed25519Keypair, public::Ed25519PublicKey};
 #[cfg(feature = "openssl")]
 use openssl::pkey::{Id, PKey};
 
+#[cfg(feature = "openssl")]
+use openssl::nid::Nid;
+
 #[cfg(feature = "dsa")]
 use {
     crate::{private::DsaKeypair, public::DsaPublicKey},
@@ -19,11 +22,10 @@ use {
     signature::{DigestSigner, DigestVerifier},
 };
 
+#[cfg(any(feature = "p256", feature = "p384", feature = "p521", feature = "openssl"))]
+use crate::{private::EcdsaKeypair, public::EcdsaPublicKey};
 #[cfg(any(feature = "p256", feature = "p384", feature = "p521"))]
-use crate::{
-    private::{EcdsaKeypair, EcdsaPrivateKey},
-    public::EcdsaPublicKey,
-};
+use crate::private::EcdsaPrivateKey;
 
 #[cfg(feature = "rsa")]
 use {
@@ -550,6 +552,110 @@ fn split_sk_signature(signature: &Signature) -> Result<(&[u8], &[u8])> {
     ))
 }
 
+// OpenSSL-backed ECDSA sign/verify, used instead of the per-curve RustCrypto
+// path (`p256`/`p384`/`p521`, wired below by `impl_signature_for_curve!`)
+// when the `openssl` feature is selected. Only NIST P-256 is implemented so
+// far. Unlike Ed25519, ECDSA signing is not required to be deterministic
+// (OpenSSL's default ECDSA_sign draws a fresh random nonce each call), so
+// this cannot be cross-checked against the RustCrypto path by comparing
+// signature bytes; interop is validated by cross-verification instead (sign
+// with one backend, verify with the other).
+#[cfg(feature = "openssl")]
+mod openssl_ecdsa {
+    use super::{Algorithm, EcdsaCurve, Mpint, Signature};
+    use alloc::vec::Vec;
+    use encoding::{Decode, Encode};
+    use openssl::bn::{BigNum, BigNumContext};
+    use openssl::ec::{EcGroup, EcKey, EcPoint};
+    use openssl::ecdsa::EcdsaSig;
+    use openssl::nid::Nid;
+
+    /// SHA-2 digest size matching the curve, per RFC 5656 §6.2.1.
+    fn digest(curve_nid: Nid, message: &[u8]) -> signature::Result<Vec<u8>> {
+        let md = match curve_nid {
+            Nid::X9_62_PRIME256V1 => openssl::hash::MessageDigest::sha256(),
+            Nid::SECP384R1 => openssl::hash::MessageDigest::sha384(),
+            Nid::SECP521R1 => openssl::hash::MessageDigest::sha512(),
+            _ => return Err(signature::Error::new()),
+        };
+        openssl::hash::hash(md, message)
+            .map(|d| d.to_vec())
+            .map_err(signature::Error::from_source)
+    }
+
+    fn public_point(
+        group: &EcGroup,
+        sec1_bytes: &[u8],
+        ctx: &mut BigNumContext,
+    ) -> signature::Result<EcPoint> {
+        EcPoint::from_bytes(group, sec1_bytes, ctx).map_err(signature::Error::from_source)
+    }
+
+    pub(super) fn sign(
+        curve_nid: Nid,
+        private_scalar: &[u8],
+        public_sec1: &[u8],
+        message: &[u8],
+        curve: EcdsaCurve,
+    ) -> signature::Result<Signature> {
+        let group = EcGroup::from_curve_name(curve_nid).map_err(signature::Error::from_source)?;
+        let mut ctx = BigNumContext::new().map_err(signature::Error::from_source)?;
+        let point = public_point(&group, public_sec1, &mut ctx)?;
+        let private_bn =
+            BigNum::from_slice(private_scalar).map_err(signature::Error::from_source)?;
+        let eckey = EcKey::from_private_components(&group, &private_bn, &point)
+            .map_err(signature::Error::from_source)?;
+
+        let hashed = digest(curve_nid, message)?;
+        let sig = EcdsaSig::sign(&hashed, &eckey).map_err(signature::Error::from_source)?;
+
+        // Same wire encoding `impl_signature_for_curve!` uses: r and s each
+        // as an SSH mpint, concatenated.
+        let mut data = Vec::new();
+        Mpint::from_positive_bytes(&sig.r().to_vec())
+            .encode(&mut data)
+            .map_err(signature::Error::from_source)?;
+        Mpint::from_positive_bytes(&sig.s().to_vec())
+            .encode(&mut data)
+            .map_err(signature::Error::from_source)?;
+
+        Ok(Signature {
+            algorithm: Algorithm::Ecdsa { curve },
+            data,
+        })
+    }
+
+    pub(super) fn verify(
+        curve_nid: Nid,
+        public_sec1: &[u8],
+        message: &[u8],
+        signature: &Signature,
+    ) -> signature::Result<()> {
+        let group = EcGroup::from_curve_name(curve_nid).map_err(signature::Error::from_source)?;
+        let mut ctx = BigNumContext::new().map_err(signature::Error::from_source)?;
+        let point = public_point(&group, public_sec1, &mut ctx)?;
+        let eckey = EcKey::from_public_key(&group, &point).map_err(signature::Error::from_source)?;
+
+        let mut reader = signature.as_bytes();
+        let r = Mpint::decode(&mut reader).map_err(signature::Error::from_source)?;
+        let s = Mpint::decode(&mut reader).map_err(signature::Error::from_source)?;
+        let r_bn = BigNum::from_slice(r.as_positive_bytes().ok_or_else(signature::Error::new)?)
+            .map_err(signature::Error::from_source)?;
+        let s_bn = BigNum::from_slice(s.as_positive_bytes().ok_or_else(signature::Error::new)?)
+            .map_err(signature::Error::from_source)?;
+        let sig = EcdsaSig::from_private_components(r_bn, s_bn)
+            .map_err(signature::Error::from_source)?;
+
+        let hashed = digest(curve_nid, message)?;
+        let ok = sig.verify(&hashed, &eckey).map_err(signature::Error::from_source)?;
+        if ok {
+            Ok(())
+        } else {
+            Err(signature::Error::new())
+        }
+    }
+}
+
 macro_rules! impl_signature_for_curve {
     ($krate:ident, $feature:expr, $curve:ident, $size:expr) => {
         #[cfg(feature = $feature)]
@@ -700,28 +806,40 @@ impl TryFrom<&Signature> for p521::ecdsa::Signature {
     }
 }
 
-#[cfg(any(feature = "p256", feature = "p384", feature = "p521"))]
+#[cfg(any(feature = "p256", feature = "p384", feature = "p521", feature = "openssl"))]
 impl Signer<Signature> for EcdsaKeypair {
     fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
         match self {
-            #[cfg(feature = "p256")]
+            #[cfg(feature = "openssl")]
+            Self::NistP256 { private, public } => {
+                openssl_ecdsa::sign(Nid::X9_62_PRIME256V1, private.as_slice(), public.as_bytes(), message, EcdsaCurve::NistP256)
+            }
+            #[cfg(all(feature = "p256", not(feature = "openssl")))]
             Self::NistP256 { private, .. } => private.try_sign(message),
             #[cfg(feature = "p384")]
             Self::NistP384 { private, .. } => private.try_sign(message),
             #[cfg(feature = "p521")]
             Self::NistP521 { private, .. } => private.try_sign(message),
-            #[cfg(not(all(feature = "p256", feature = "p384", feature = "p521")))]
+            #[allow(unreachable_patterns)]
             _ => Err(self.algorithm().unsupported_error().into()),
         }
     }
 }
 
-#[cfg(any(feature = "p256", feature = "p384", feature = "p521"))]
+#[cfg(any(feature = "p256", feature = "p384", feature = "p521", feature = "openssl"))]
 impl Verifier<Signature> for EcdsaPublicKey {
     fn verify(&self, message: &[u8], signature: &Signature) -> signature::Result<()> {
         match signature.algorithm {
             Algorithm::Ecdsa { curve } => match curve {
-                #[cfg(feature = "p256")]
+                #[cfg(feature = "openssl")]
+                EcdsaCurve::NistP256 => {
+                    let Self::NistP256(point) = self else {
+                        return Err(signature.algorithm().unsupported_error().into());
+                    };
+                    openssl_ecdsa::verify(Nid::X9_62_PRIME256V1, point.as_bytes(), message, signature)
+                }
+
+                #[cfg(all(feature = "p256", not(feature = "openssl")))]
                 EcdsaCurve::NistP256 => {
                     let verifying_key = p256::ecdsa::VerifyingKey::try_from(self)?;
                     let signature = p256::ecdsa::Signature::try_from(signature)?;
@@ -742,7 +860,7 @@ impl Verifier<Signature> for EcdsaPublicKey {
                     verifying_key.verify(message, &signature)
                 }
 
-                #[cfg(not(all(feature = "p256", feature = "p384", feature = "p521")))]
+                #[allow(unreachable_patterns)]
                 _ => Err(signature.algorithm().unsupported_error().into()),
             },
             _ => Err(signature.algorithm().unsupported_error().into()),
@@ -823,6 +941,11 @@ mod tests {
 
     #[cfg(feature = "p256")]
     use super::{Mpint, zero_pad_field_bytes};
+
+    #[cfg(feature = "openssl")]
+    use super::{EcdsaKeypair, EcdsaPublicKey};
+    #[cfg(feature = "openssl")]
+    use crate::private::EcdsaPrivateKey;
 
     const DSA_SIGNATURE: &[u8] = &hex!(
         "000000077373682d6473730000002866725bf3c56100e975e21fff28a60f73717534d285ea3e1beefc2891f7189d00bd4d94627e84c55c"
@@ -1062,6 +1185,33 @@ mod tests {
         let keypair = Ed25519Keypair::from_bytes(&keypair_bytes).unwrap();
         let signature = keypair.try_sign(EXAMPLE_MSG).unwrap();
         assert!(keypair.public.verify(EXAMPLE_MSG, &signature).is_ok());
+    }
+
+    /// A real NIST P-256 keypair generated with the system `openssl` CLI
+    /// (`openssl ecparam -name prime256v1 -genkey -noout`), to avoid needing
+    /// the `rand_core`/`p256` RustCrypto path just to produce a test key.
+    #[cfg(feature = "openssl")]
+    #[test]
+    fn sign_and_verify_ecdsa_p256_openssl() {
+        let private: EcdsaPrivateKey<32> = hex!(
+            "74fd583a654d5b3a35ee8fd8a22f96a81537903978be2b413dc6ddd2ce933416"
+        )
+        .into();
+        let public = sec1::EncodedPoint::from_bytes(hex!(
+            "04bb7a0af371a55f6f2dacf4b770c4365949dff17e8de57c756692f000eb5452b21b9037008346b68702e8a27d385a088407123202adece4746f9e91e5193b6566"
+        ))
+        .unwrap();
+        let keypair = EcdsaKeypair::NistP256 { private, public };
+
+        let signature = keypair.try_sign(EXAMPLE_MSG).unwrap();
+        let EcdsaKeypair::NistP256 { public, .. } = &keypair else {
+            unreachable!()
+        };
+        assert!(
+            EcdsaPublicKey::NistP256(*public)
+                .verify(EXAMPLE_MSG, &signature)
+                .is_ok()
+        );
     }
 
     #[test]

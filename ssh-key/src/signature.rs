@@ -6,8 +6,11 @@ use core::fmt;
 use encoding::{CheckedSum, Decode, Encode, Reader, Writer};
 use signature::{SignatureEncoding, Signer, Verifier};
 
-#[cfg(feature = "ed25519")]
+#[cfg(any(feature = "ed25519", feature = "openssl"))]
 use crate::{private::Ed25519Keypair, public::Ed25519PublicKey};
+
+#[cfg(feature = "openssl")]
+use openssl::pkey::{Id, PKey};
 
 #[cfg(feature = "dsa")]
 use {
@@ -432,7 +435,7 @@ impl TryFrom<&Signature> for ed25519_dalek::Signature {
     }
 }
 
-#[cfg(feature = "ed25519")]
+#[cfg(all(feature = "ed25519", not(feature = "openssl")))]
 impl Signer<Signature> for Ed25519Keypair {
     fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
         let signature = ed25519_dalek::SigningKey::try_from(self)?.sign(message);
@@ -444,11 +447,57 @@ impl Signer<Signature> for Ed25519Keypair {
     }
 }
 
-#[cfg(feature = "ed25519")]
+#[cfg(all(feature = "ed25519", not(feature = "openssl")))]
 impl Verifier<Signature> for Ed25519PublicKey {
     fn verify(&self, message: &[u8], signature: &Signature) -> signature::Result<()> {
         let signature = ed25519_dalek::Signature::try_from(signature)?;
         ed25519_dalek::VerifyingKey::try_from(self)?.verify(message, &signature)
+    }
+}
+
+// OpenSSL-backed Ed25519 sign/verify. Independent of the `ed25519` feature
+// (which pulls in `ed25519-dalek`): this path never links that crate, so a
+// consumer that wants every cryptographic operation to go through a single,
+// FIPS-certifiable OpenSSL build can select `openssl` without `ed25519` at
+// all. Ed25519 has no separate digest step in OpenSSL's EVP API (the whole
+// message is signed in one call), hence `Signer`/`Verifier` constructed
+// without specifying a `MessageDigest`.
+#[cfg(feature = "openssl")]
+impl Signer<Signature> for Ed25519Keypair {
+    fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
+        let pkey = PKey::private_key_from_raw_bytes(self.private.as_ref(), Id::ED25519)
+            .map_err(signature::Error::from_source)?;
+        let mut signer = openssl::sign::Signer::new_without_digest(&pkey)
+            .map_err(signature::Error::from_source)?;
+        let data = signer
+            .sign_oneshot_to_vec(message)
+            .map_err(signature::Error::from_source)?;
+
+        Ok(Signature {
+            algorithm: Algorithm::Ed25519,
+            data,
+        })
+    }
+}
+
+#[cfg(feature = "openssl")]
+impl Verifier<Signature> for Ed25519PublicKey {
+    fn verify(&self, message: &[u8], signature: &Signature) -> signature::Result<()> {
+        if signature.algorithm != Algorithm::Ed25519 {
+            return Err(signature::Error::new());
+        }
+        let pkey = PKey::public_key_from_raw_bytes(self.as_ref(), Id::ED25519)
+            .map_err(signature::Error::from_source)?;
+        let mut verifier = openssl::sign::Verifier::new_without_digest(&pkey)
+            .map_err(signature::Error::from_source)?;
+        let ok = verifier
+            .verify_oneshot(signature.as_bytes(), message)
+            .map_err(signature::Error::from_source)?;
+        if ok {
+            Ok(())
+        } else {
+            Err(signature::Error::new())
+        }
     }
 }
 
@@ -767,9 +816,9 @@ mod tests {
     use encoding::Encode;
     use hex_literal::hex;
 
-    #[cfg(any(feature = "ed25519", all(feature = "rsa", feature = "sha1")))]
+    #[cfg(any(feature = "ed25519", feature = "openssl", all(feature = "rsa", feature = "sha1")))]
     use signature::Verifier;
-    #[cfg(feature = "ed25519")]
+    #[cfg(any(feature = "ed25519", feature = "openssl"))]
     use {super::Ed25519Keypair, signature::Signer};
 
     #[cfg(feature = "p256")]
@@ -795,7 +844,7 @@ mod tests {
     );
 
     /// Example test vector for signing.
-    #[cfg(any(feature = "ed25519", all(feature = "rsa", feature = "sha1")))]
+    #[cfg(any(feature = "ed25519", feature = "openssl", all(feature = "rsa", feature = "sha1")))]
     const EXAMPLE_MSG: &[u8] = b"Hello, world!";
 
     #[cfg(feature = "p256")]
@@ -998,6 +1047,28 @@ mod tests {
     fn sign_and_verify_ed25519() {
         let keypair = Ed25519Keypair::from_seed(&[42; 32]);
         let signature = keypair.sign(EXAMPLE_MSG);
+        assert!(keypair.public.verify(EXAMPLE_MSG, &signature).is_ok());
+    }
+
+    /// Same keypair/message as `sign_and_verify_ed25519`, built via
+    /// `from_bytes` instead of `from_seed` (the latter needs the `ed25519`
+    /// feature to derive the public key). `EXPECTED_SIGNATURE` was captured
+    /// once from the unmodified `ed25519-dalek` path on this same input and
+    /// is checked byte-for-byte here: Ed25519 is deterministic, so any
+    /// divergence between the two backends would show up as a signature
+    /// mismatch, not just a verification failure.
+    #[cfg(feature = "openssl")]
+    #[test]
+    fn sign_and_verify_ed25519_openssl() {
+        const EXPECTED_SIGNATURE: [u8; 64] = hex!(
+            "85a95ec7db80c3da6ead5c3477f84e897e1705b7b00b91b7a562f73cd85d45abbc5d47e0be8951daf6022cae24acc685a49a6d2b0f7f4fda61ccf1cc90a57a05"
+        );
+        let keypair_bytes: [u8; 64] = hex!(
+            "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61"
+        );
+        let keypair = Ed25519Keypair::from_bytes(&keypair_bytes).unwrap();
+        let signature = keypair.try_sign(EXAMPLE_MSG).unwrap();
+        assert_eq!(signature.as_bytes(), &EXPECTED_SIGNATURE[..]);
         assert!(keypair.public.verify(EXAMPLE_MSG, &signature).is_ok());
     }
 

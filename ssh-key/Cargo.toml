@@ -35,6 +35,7 @@ hmac = { version = "0.13", optional = true }
 p256 = { version = "0.14.0-rc.15", optional = true, default-features = false, features = ["ecdsa"] }
 p384 = { version = "0.14.0-rc.15", optional = true, default-features = false, features = ["ecdsa"] }
 p521 = { version = "0.14.0-rc.15", optional = true, default-features = false, features = ["ecdsa"] }
+openssl = { version = "0.10", optional = true }
 rand_core = { version = "0.10", optional = true, default-features = false }
 rsa = { version = "0.10.0-rc.18", optional = true, default-features = false, features = ["sha2"] }
 sec1 = { version = "0.8", optional = true, default-features = false, features = ["point"] }
@@ -63,6 +64,11 @@ encryption = [
     "rand_core"
 ]
 getrandom = ["cipher/getrandom", "rand_core"]
+# Sign/verify Ed25519 via system OpenSSL (openssl-sys) instead of ed25519-dalek,
+# for environments that require all cryptographic operations to go through a
+# FIPS-certifiable OpenSSL build. Still requires the `ed25519` feature (for the
+# key storage/encoding types); this only swaps the signing/verification backend.
+openssl = ["dep:openssl", "std"]
 p256 = ["dep:p256", "ecdsa"]
 p384 = ["dep:p384", "ecdsa"]
 p521 = ["dep:p521", "ecdsa"]

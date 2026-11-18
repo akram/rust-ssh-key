@@ -221,7 +221,7 @@ impl EcdsaKeypair {
     #[allow(unused_variables)]
     pub fn random<R: CryptoRng + ?Sized>(rng: &mut R, curve: EcdsaCurve) -> Result<Self> {
         match curve {
-            #[cfg(feature = "p256")]
+            #[cfg(all(feature = "p256", not(feature = "openssl")))]
             EcdsaCurve::NistP256 => {
                 let private = p256::SecretKey::generate_from_rng(rng);
                 let public = private.public_key();
@@ -230,7 +230,7 @@ impl EcdsaKeypair {
                     public: public.into(),
                 })
             }
-            #[cfg(feature = "p384")]
+            #[cfg(all(feature = "p384", not(feature = "openssl")))]
             EcdsaCurve::NistP384 => {
                 let private = p384::SecretKey::generate_from_rng(rng);
                 let public = private.public_key();
@@ -239,7 +239,7 @@ impl EcdsaKeypair {
                     public: public.into(),
                 })
             }
-            #[cfg(feature = "p521")]
+            #[cfg(all(feature = "p521", not(feature = "openssl")))]
             EcdsaCurve::NistP521 => {
                 let private = p521::SecretKey::generate_from_rng(rng);
                 let public = private.public_key();
@@ -248,7 +248,14 @@ impl EcdsaKeypair {
                     public: public.into(),
                 })
             }
-            #[cfg(not(all(feature = "p256", feature = "p384", feature = "p521")))]
+            #[cfg(feature = "openssl")]
+            EcdsaCurve::NistP256 | EcdsaCurve::NistP384 | EcdsaCurve::NistP521 => {
+                openssl_ecdsa_keygen::random(curve)
+            }
+            #[cfg(not(any(
+                feature = "openssl",
+                all(feature = "p256", feature = "p384", feature = "p521")
+            )))]
             _ => Err(Error::AlgorithmUnsupported {
                 algorithm: curve.into(),
             }),
@@ -384,5 +391,57 @@ impl From<&EcdsaKeypair> for EcdsaPublicKey {
             EcdsaKeypair::NistP384 { public, .. } => EcdsaPublicKey::NistP384(*public),
             EcdsaKeypair::NistP521 { public, .. } => EcdsaPublicKey::NistP521(*public),
         }
+    }
+}
+
+// OpenSSL-backed ECDSA key generation, as an alternative to the
+// `p256`/`p384`/`p521` crates' `generate_from_rng`. Independent of
+// `rand_core`: OpenSSL draws randomness from its own RNG rather than a
+// caller-supplied `CryptoRng`.
+#[cfg(feature = "openssl")]
+mod openssl_ecdsa_keygen {
+    use super::{EcdsaCurve, EcdsaKeypair, EcdsaPrivateKey, Error, Result};
+    use openssl::bn::{BigNumContext, BigNumRef};
+    use openssl::ec::{EcGroup, EcKey, PointConversionForm};
+    use openssl::nid::Nid;
+
+    fn nid_for(curve: EcdsaCurve) -> Nid {
+        match curve {
+            EcdsaCurve::NistP256 => Nid::X9_62_PRIME256V1,
+            EcdsaCurve::NistP384 => Nid::SECP384R1,
+            EcdsaCurve::NistP521 => Nid::SECP521R1,
+        }
+    }
+
+    fn padded<const N: usize>(bn: &BigNumRef) -> Result<EcdsaPrivateKey<N>> {
+        let padded = bn.to_vec_padded(N as i32).map_err(|_| Error::Crypto)?;
+        let array: [u8; N] = padded.try_into().map_err(|_| Error::Crypto)?;
+        Ok(EcdsaPrivateKey::<N>::from(array))
+    }
+
+    pub(super) fn random(curve: EcdsaCurve) -> Result<EcdsaKeypair> {
+        let group = EcGroup::from_curve_name(nid_for(curve)).map_err(|_| Error::Crypto)?;
+        let ec_key = EcKey::generate(&group).map_err(|_| Error::Crypto)?;
+        let mut ctx = BigNumContext::new().map_err(|_| Error::Crypto)?;
+        let pub_bytes = ec_key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .map_err(|_| Error::Crypto)?;
+        let priv_bn = ec_key.private_key();
+
+        Ok(match curve {
+            EcdsaCurve::NistP256 => EcdsaKeypair::NistP256 {
+                public: sec1::EncodedPoint::from_bytes(&pub_bytes).map_err(|_| Error::Crypto)?,
+                private: padded::<32>(priv_bn)?,
+            },
+            EcdsaCurve::NistP384 => EcdsaKeypair::NistP384 {
+                public: sec1::EncodedPoint::from_bytes(&pub_bytes).map_err(|_| Error::Crypto)?,
+                private: padded::<48>(priv_bn)?,
+            },
+            EcdsaCurve::NistP521 => EcdsaKeypair::NistP521 {
+                public: sec1::EncodedPoint::from_bytes(&pub_bytes).map_err(|_| Error::Crypto)?,
+                private: padded::<66>(priv_bn)?,
+            },
+        })
     }
 }

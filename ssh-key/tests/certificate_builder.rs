@@ -10,7 +10,7 @@ use chacha20::{ChaCha8Rng, rand_core::SeedableRng};
 use hex_literal::hex;
 use ssh_key::{Algorithm, PrivateKey, certificate};
 
-#[cfg(feature = "p256")]
+#[cfg(any(feature = "p256", feature = "openssl"))]
 use ssh_key::EcdsaCurve;
 
 #[cfg(all(any(feature = "ed25519", feature = "openssl"), feature = "rsa"))]
@@ -100,7 +100,7 @@ fn ed25519_sign_and_verify() {
     assert!(cert.validate_at(VALID_AT, &[ca_fingerprint]).is_ok());
 }
 
-#[cfg(feature = "p256")]
+#[cfg(any(feature = "p256", feature = "openssl"))]
 #[test]
 fn ecdsa_nistp256_sign_and_verify() {
     let mut rng = ChaCha8Rng::from_seed(PRNG_SEED);
@@ -121,6 +121,12 @@ fn ecdsa_nistp256_sign_and_verify() {
     let cert = cert_builder.sign(&ca_key).unwrap();
 
     assert_eq!(cert.algorithm(), algorithm);
+    // The OpenSSL backend generates ECDSA keys via OpenSSL's own RNG rather
+    // than consuming the seeded `rng` passed in here (consistent with
+    // routing all randomness through a single, FIPS-relevant RNG), so the
+    // nonce's exact bytes -- which depend on how much of that seeded stream
+    // key generation consumed first -- aren't reproducible across backends.
+    #[cfg(not(feature = "openssl"))]
     assert_eq!(cert.nonce(), &hex!("321fdf7e0a2afe803308f394f54c6abe"));
     assert_eq!(cert.public_key(), subject_key.public_key().key_data());
     assert_eq!(cert.signature_key(), ca_key.public_key().key_data());

@@ -614,7 +614,7 @@ impl PrivateKey {
         let key_data = match algorithm {
             #[cfg(feature = "dsa")]
             Algorithm::Dsa => KeypairData::from(DsaKeypair::random(rng)?),
-            #[cfg(any(feature = "p256", feature = "p384", feature = "p521"))]
+            #[cfg(any(feature = "p256", feature = "p384", feature = "p521", feature = "openssl"))]
             Algorithm::Ecdsa { curve } => KeypairData::from(EcdsaKeypair::random(rng, curve)?),
             #[cfg(any(feature = "ed25519", feature = "openssl"))]
             Algorithm::Ed25519 => KeypairData::from(Ed25519Keypair::random(rng)),

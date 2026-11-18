@@ -299,9 +299,9 @@ impl Signer<Signature> for private::KeypairData {
         match self {
             #[cfg(feature = "dsa")]
             Self::Dsa(keypair) => keypair.try_sign(message),
-            #[cfg(any(feature = "p256", feature = "p384", feature = "p521"))]
+            #[cfg(any(feature = "p256", feature = "p384", feature = "p521", feature = "openssl"))]
             Self::Ecdsa(keypair) => keypair.try_sign(message),
-            #[cfg(feature = "ed25519")]
+            #[cfg(any(feature = "ed25519", feature = "openssl"))]
             Self::Ed25519(keypair) => keypair.try_sign(message),
             #[cfg(feature = "rsa")]
             Self::Rsa(keypair) => keypair.try_sign(message),
@@ -322,9 +322,9 @@ impl Verifier<Signature> for public::KeyData {
         match self {
             #[cfg(feature = "dsa")]
             Self::Dsa(pk) => pk.verify(message, signature),
-            #[cfg(any(feature = "p256", feature = "p384", feature = "p521"))]
+            #[cfg(any(feature = "p256", feature = "p384", feature = "p521", feature = "openssl"))]
             Self::Ecdsa(pk) => pk.verify(message, signature),
-            #[cfg(feature = "ed25519")]
+            #[cfg(any(feature = "ed25519", feature = "openssl"))]
             Self::Ed25519(pk) => pk.verify(message, signature),
             #[cfg(feature = "ed25519")]
             Self::SkEd25519(pk) => pk.verify(message, signature),
@@ -1323,7 +1323,7 @@ mod tests {
             .expect("dsa verify is ok");
     }
 
-    #[cfg(feature = "ed25519")]
+    #[cfg(any(feature = "ed25519", feature = "openssl"))]
     #[test]
     fn sign_and_verify_ed25519() {
         let keypair = Ed25519Keypair::from_seed(&[42; 32]);

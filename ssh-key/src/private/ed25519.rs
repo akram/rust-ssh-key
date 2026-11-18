@@ -127,7 +127,7 @@ impl From<&ed25519_dalek::SigningKey> for Ed25519PrivateKey {
     }
 }
 
-#[cfg(feature = "ed25519")]
+#[cfg(any(feature = "ed25519", feature = "openssl"))]
 impl From<Ed25519PrivateKey> for Ed25519PublicKey {
     fn from(private: Ed25519PrivateKey) -> Ed25519PublicKey {
         Ed25519PublicKey::from(&private)
@@ -140,6 +140,27 @@ impl From<&Ed25519PrivateKey> for Ed25519PublicKey {
         ed25519_dalek::SigningKey::from(private)
             .verifying_key()
             .into()
+    }
+}
+
+// Derive the public key from a seed via OpenSSL instead of `ed25519-dalek`,
+// so a build selecting the `openssl` crypto backend doesn't need the
+// `ed25519-dalek`/`curve25519-dalek` crates just to generate a new host key
+// (`PrivateKey::random`) or expand a seed (`Ed25519Keypair::from_seed`).
+#[cfg(all(feature = "openssl", not(feature = "ed25519")))]
+impl From<&Ed25519PrivateKey> for Ed25519PublicKey {
+    fn from(private: &Ed25519PrivateKey) -> Ed25519PublicKey {
+        let pkey = openssl::pkey::PKey::private_key_from_raw_bytes(
+            private.as_ref(),
+            openssl::pkey::Id::ED25519,
+        )
+        .expect("a 32-byte seed is always a valid Ed25519 private key");
+        let raw_public = pkey
+            .raw_public_key()
+            .expect("an Ed25519 PKey always has a public component");
+        let mut bytes = [0u8; Ed25519PublicKey::BYTE_SIZE];
+        bytes.copy_from_slice(&raw_public);
+        Ed25519PublicKey(bytes)
     }
 }
 
@@ -158,13 +179,13 @@ impl Ed25519Keypair {
     pub const BYTE_SIZE: usize = 64;
 
     /// Generate a random Ed25519 private keypair.
-    #[cfg(feature = "ed25519")]
+    #[cfg(any(feature = "ed25519", feature = "openssl"))]
     pub fn random<R: CryptoRng + ?Sized>(rng: &mut R) -> Self {
         Ed25519PrivateKey::random(rng).into()
     }
 
     /// Expand a keypair from a 32-byte seed value.
-    #[cfg(feature = "ed25519")]
+    #[cfg(any(feature = "ed25519", feature = "openssl"))]
     #[must_use]
     pub fn from_seed(seed: &[u8; Ed25519PrivateKey::BYTE_SIZE]) -> Self {
         Ed25519PrivateKey::from_bytes(seed).into()
@@ -180,7 +201,7 @@ impl Ed25519Keypair {
         let public = Ed25519PublicKey::try_from(pub_bytes)?;
 
         // Validate the public key if possible
-        #[cfg(feature = "ed25519")]
+        #[cfg(any(feature = "ed25519", feature = "openssl"))]
         if Ed25519PublicKey::from(&private) != public {
             return Err(Error::Crypto);
         }
@@ -282,6 +303,14 @@ impl From<Ed25519PrivateKey> for Ed25519Keypair {
     fn from(private: Ed25519PrivateKey) -> Ed25519Keypair {
         let secret = ed25519_dalek::SigningKey::from(&private);
         let public = secret.verifying_key().into();
+        Ed25519Keypair { private, public }
+    }
+}
+
+#[cfg(all(feature = "openssl", not(feature = "ed25519")))]
+impl From<Ed25519PrivateKey> for Ed25519Keypair {
+    fn from(private: Ed25519PrivateKey) -> Ed25519Keypair {
+        let public = Ed25519PublicKey::from(&private);
         Ed25519Keypair { private, public }
     }
 }

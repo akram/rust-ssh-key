@@ -3,7 +3,7 @@
 #![cfg(all(
     feature = "alloc",
     feature = "rand_core",
-    any(feature = "ed25519", feature = "p256")
+    any(feature = "ed25519", feature = "p256", feature = "openssl")
 ))]
 
 use chacha20::{ChaCha8Rng, rand_core::SeedableRng};
@@ -13,10 +13,10 @@ use ssh_key::{Algorithm, PrivateKey, certificate};
 #[cfg(feature = "p256")]
 use ssh_key::EcdsaCurve;
 
-#[cfg(all(feature = "ed25519", feature = "rsa"))]
+#[cfg(all(any(feature = "ed25519", feature = "openssl"), feature = "rsa"))]
 use core::str::FromStr;
 
-#[cfg(all(feature = "ed25519", feature = "std"))]
+#[cfg(all(any(feature = "ed25519", feature = "openssl"), feature = "std"))]
 use {core::time::Duration, std::time::SystemTime};
 
 /// Example Unix timestamp when a certificate was issued (2020-09-13 12:26:40 UTC).
@@ -31,7 +31,7 @@ const EXPIRES_AT: u64 = 1700000000;
 /// Seed to use for PRNG.
 const PRNG_SEED: [u8; 32] = [42; 32];
 
-#[cfg(feature = "ed25519")]
+#[cfg(any(feature = "ed25519", feature = "openssl"))]
 #[test]
 fn ed25519_sign_and_verify() {
     const SERIAL: u64 = 42;
@@ -129,7 +129,7 @@ fn ecdsa_nistp256_sign_and_verify() {
     assert!(cert.validate_at(VALID_AT, &[ca_fingerprint]).is_ok());
 }
 
-#[cfg(all(feature = "ed25519", feature = "rsa"))]
+#[cfg(all(any(feature = "ed25519", feature = "openssl"), feature = "rsa"))]
 #[test]
 fn rsa_sign_and_verify() {
     let ca_key = PrivateKey::from_str(
@@ -187,7 +187,7 @@ R6qbyo6hPuCiV9cAAAAAAQID
     assert!(cert.validate_at(VALID_AT, &[ca_fingerprint]).is_ok());
 }
 
-#[cfg(all(feature = "ed25519", feature = "std"))]
+#[cfg(all(any(feature = "ed25519", feature = "openssl"), feature = "std"))]
 #[test]
 fn new_with_validity_times() {
     let mut rng = ChaCha8Rng::from_seed(PRNG_SEED);

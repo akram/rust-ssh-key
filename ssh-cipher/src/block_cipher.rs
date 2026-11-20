@@ -3,7 +3,7 @@
 //! This module provides APIs which enable streaming and "peeking" when using unauthenticated block
 //! cipher modes such as CBC and CTR.
 
-#[cfg(feature = "aes")]
+#[cfg(feature = "aes-rust-crypto")]
 mod aes;
 mod decryptor;
 mod encryptor;
@@ -14,7 +14,7 @@ pub use ::cipher::{
     Block, BlockModeDecrypt, BlockModeEncrypt, common::BlockSizeUser, common::InvalidLength,
 };
 
-#[cfg(feature = "aes")]
+#[cfg(feature = "aes-rust-crypto")]
 pub use self::aes::Aes;
 #[cfg(feature = "tdes")]
 pub use ::des::TdesEde3 as Tdes;
@@ -59,10 +59,10 @@ pub(crate) enum BlockMode {
 }
 
 /// Encryptor for the Advanced Encryption Standard (AES).
-#[cfg(feature = "aes")]
+#[cfg(feature = "aes-rust-crypto")]
 pub type AesEncryptor = Encryptor<Aes>;
 /// Decryptor for the Advanced Encryption Standard (AES).
-#[cfg(feature = "aes")]
+#[cfg(feature = "aes-rust-crypto")]
 pub type AesDecryptor = Decryptor<Aes>;
 
 /// Encryptor for 3DES.

@@ -348,7 +348,7 @@ impl Cipher {
     ///
     /// # Errors
     /// Returns [`Error::Length`] unless the length of `buffer` is a multiple of the block size.
-    #[cfg(any(feature = "aes", feature = "tdes"))]
+    #[cfg(any(feature = "aes-rust-crypto", feature = "tdes"))]
     fn decrypt_with_block_cipher<C: BlockCipher>(
         self,
         key: &[u8],
@@ -372,7 +372,7 @@ impl Cipher {
     ///
     /// # Errors
     /// Propagates errors from [`block_cipher::Decryptor::new`].
-    #[cfg(any(feature = "aes", feature = "tdes"))]
+    #[cfg(any(feature = "aes-rust-crypto", feature = "tdes"))]
     pub fn decryptor<C>(self, key: &[u8], iv: &[u8]) -> Result<block_cipher::Decryptor<C>>
     where
         C: BlockCipher,
@@ -459,7 +459,7 @@ impl Cipher {
     ///
     /// # Errors
     /// Returns [`Error::Length`] unless the length of `buffer` is a multiple of the block size.
-    #[cfg(any(feature = "aes", feature = "tdes"))]
+    #[cfg(any(feature = "aes-rust-crypto", feature = "tdes"))]
     fn encrypt_with_block_cipher<C: BlockCipher>(
         self,
         key: &[u8],
@@ -483,7 +483,7 @@ impl Cipher {
     ///
     /// # Errors
     /// Propagates errors from [`block_cipher::Encryptor::new`].
-    #[cfg(any(feature = "aes", feature = "tdes"))]
+    #[cfg(any(feature = "aes-rust-crypto", feature = "tdes"))]
     pub fn encryptor<C>(self, key: &[u8], iv: &[u8]) -> Result<block_cipher::Encryptor<C>>
     where
         C: BlockCipher,
@@ -492,12 +492,12 @@ impl Cipher {
     }
 
     /// Get the block cipher mode of operation for this `Cipher`, if applicable.
-    #[cfg(any(feature = "aes", feature = "tdes"))]
+    #[cfg(any(feature = "aes-rust-crypto", feature = "tdes"))]
     pub(crate) fn block_mode(self) -> Option<BlockMode> {
         match self {
-            #[cfg(feature = "aes")]
+            #[cfg(feature = "aes-rust-crypto")]
             Self::Aes128Cbc | Self::Aes192Cbc | Self::Aes256Cbc => Some(BlockMode::Cbc),
-            #[cfg(feature = "aes")]
+            #[cfg(feature = "aes-rust-crypto")]
             Self::Aes128Ctr | Self::Aes192Ctr | Self::Aes256Ctr => Some(BlockMode::Ctr),
             #[cfg(feature = "tdes")]
             Self::TdesCbc => Some(BlockMode::Cbc),

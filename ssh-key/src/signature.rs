@@ -30,7 +30,7 @@ use crate::private::EcdsaPrivateKey;
 #[cfg(any(feature = "rsa", feature = "openssl"))]
 use crate::{HashAlg, private::RsaKeypair, public::RsaPublicKey};
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 use sha2::Sha512;
 
 #[cfg(any(
@@ -1009,7 +1009,7 @@ impl Signer<Signature> for (&RsaKeypair, Option<HashAlg>) {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl Signer<Signature> for (&RsaKeypair, Option<HashAlg>) {
     fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
         let data = match self.1 {
@@ -1050,7 +1050,7 @@ impl Verifier<Signature> for RsaPublicKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl Verifier<Signature> for RsaPublicKey {
     fn verify(&self, message: &[u8], signature: &Signature) -> signature::Result<()> {
         match signature.algorithm {

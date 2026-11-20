@@ -76,7 +76,13 @@ p384 = ["dep:p384", "ecdsa"]
 p521 = ["dep:p521", "ecdsa"]
 ppk = ["dep:hex", "alloc", "cipher/aes", "dep:hmac", "dep:argon2", "dep:sha1"]
 rand_core = ["dep:rand_core", "cipher/rand_core"]
-rsa = ["dep:rsa", "alloc", "encoding/bigint", "rand_core"]
+# Backend-agnostic: RSA key *type* support (Mpint-based storage, no
+# RustCrypto `rsa` crate needed for that by itself). `rsa-rust-crypto`
+# below is the separate, explicit opt-in for the RustCrypto backend;
+# `openssl` has its own sign/verify/keygen/format path and doesn't need
+# either.
+rsa = ["alloc", "encoding/bigint", "rand_core"]
+rsa-rust-crypto = ["rsa", "dep:rsa"]
 sha1 = ["dep:sha1"]
 tdes = ["cipher/tdes", "encryption"]
 

@@ -12,7 +12,7 @@ use zeroize::Zeroize;
 // non-openssl `random()` and signing path.
 #[cfg(feature = "rsa")]
 use rand_core::CryptoRng;
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 use {
     encoding::Uint,
     rsa::{pkcs1v15, traits::PrivateKeyParts},
@@ -177,7 +177,7 @@ impl RsaKeypair {
     }
 
     /// Generate a random RSA keypair of the given size.
-    #[cfg(all(feature = "rsa", not(feature = "openssl")))]
+    #[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
     #[expect(clippy::missing_errors_doc, reason = "TODO")]
     pub fn random<R: CryptoRng + ?Sized>(rng: &mut R, bit_size: usize) -> Result<Self> {
         rsa::PrivateKey::new(rng, bit_size)?.try_into()
@@ -273,7 +273,7 @@ impl From<&RsaKeypair> for RsaPublicKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl TryFrom<RsaKeypair> for rsa::PrivateKey {
     type Error = Error;
 
@@ -282,7 +282,7 @@ impl TryFrom<RsaKeypair> for rsa::PrivateKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl TryFrom<&RsaKeypair> for rsa::PrivateKey {
     type Error = Error;
 
@@ -301,7 +301,7 @@ impl TryFrom<&RsaKeypair> for rsa::PrivateKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl TryFrom<rsa::PrivateKey> for RsaKeypair {
     type Error = Error;
 
@@ -310,7 +310,7 @@ impl TryFrom<rsa::PrivateKey> for RsaKeypair {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl TryFrom<&rsa::PrivateKey> for RsaKeypair {
     type Error = Error;
 
@@ -337,7 +337,7 @@ impl TryFrom<&rsa::PrivateKey> for RsaKeypair {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl<D> TryFrom<&RsaKeypair> for pkcs1v15::SigningKey<D>
 where
     D: Digest + AssociatedOid,

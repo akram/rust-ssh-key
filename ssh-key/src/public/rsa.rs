@@ -4,7 +4,7 @@ use crate::{Error, Mpint, Result};
 use core::hash::{Hash, Hasher};
 use encoding::{CheckedSum, Decode, Encode, Reader, Writer};
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 use {
     encoding::Uint,
     rsa::{pkcs1v15, traits::PublicKeyParts},
@@ -99,7 +99,7 @@ impl Hash for RsaPublicKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl TryFrom<RsaPublicKey> for rsa::PublicKey {
     type Error = Error;
 
@@ -108,7 +108,7 @@ impl TryFrom<RsaPublicKey> for rsa::PublicKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl TryFrom<&RsaPublicKey> for rsa::PublicKey {
     type Error = Error;
 
@@ -121,7 +121,7 @@ impl TryFrom<&RsaPublicKey> for rsa::PublicKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl TryFrom<rsa::PublicKey> for RsaPublicKey {
     type Error = Error;
 
@@ -130,7 +130,7 @@ impl TryFrom<rsa::PublicKey> for RsaPublicKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl TryFrom<&rsa::PublicKey> for RsaPublicKey {
     type Error = Error;
 
@@ -139,7 +139,7 @@ impl TryFrom<&rsa::PublicKey> for RsaPublicKey {
     }
 }
 
-#[cfg(all(feature = "rsa", not(feature = "openssl")))]
+#[cfg(all(feature = "rsa-rust-crypto", not(feature = "openssl")))]
 impl<D> TryFrom<&RsaPublicKey> for pkcs1v15::VerifyingKey<D>
 where
     D: Digest + AssociatedOid,

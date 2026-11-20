@@ -6,10 +6,15 @@ use ctutils::{Choice, CtEq};
 use encoding::{CheckedSum, Decode, Encode, Reader, Writer};
 use zeroize::Zeroize;
 
+// `CryptoRng` is part of `random()`'s signature on both backends (even
+// though the openssl backend doesn't use the RNG it's handed); the rest
+// here backs only the RustCrypto `rsa`/`pkcs1v15` conversions used by the
+// non-openssl `random()` and signing path.
 #[cfg(feature = "rsa")]
+use rand_core::CryptoRng;
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 use {
     encoding::Uint,
-    rand_core::CryptoRng,
     rsa::{pkcs1v15, traits::PrivateKeyParts},
     sha2::{Digest, digest::const_oid::AssociatedOid},
 };
@@ -148,7 +153,31 @@ pub struct RsaKeypair {
 
 impl RsaKeypair {
     /// Generate a random RSA keypair of the given size.
-    #[cfg(feature = "rsa")]
+    #[cfg(all(feature = "rsa", feature = "openssl"))]
+    #[expect(clippy::missing_errors_doc, reason = "TODO")]
+    pub fn random<R: CryptoRng + ?Sized>(_rng: &mut R, bit_size: usize) -> Result<Self> {
+        // OpenSSL's RSA_generate_key manages its own RNG (the system/libcrypto
+        // DRBG), so `_rng` goes unused here; it stays in the signature so
+        // callers don't need to know which backend is compiled in.
+        use openssl::bn::BigNumRef;
+        use openssl::rsa::Rsa;
+
+        let bits = u32::try_from(bit_size).map_err(|_| Error::Crypto)?;
+        let rsa = Rsa::generate(bits).map_err(|_| Error::Crypto)?;
+
+        let to_mpint = |bn: &BigNumRef| Mpint::from_positive_bytes(&bn.to_vec());
+        let public = RsaPublicKey::new(to_mpint(rsa.e()), to_mpint(rsa.n()))?;
+        let private = RsaPrivateKey::new(
+            to_mpint(rsa.d()),
+            to_mpint(rsa.iqmp().ok_or(Error::Crypto)?),
+            to_mpint(rsa.p().ok_or(Error::Crypto)?),
+            to_mpint(rsa.q().ok_or(Error::Crypto)?),
+        )?;
+        Self::new(public, private)
+    }
+
+    /// Generate a random RSA keypair of the given size.
+    #[cfg(all(feature = "rsa", not(feature = "openssl")))]
     #[expect(clippy::missing_errors_doc, reason = "TODO")]
     pub fn random<R: CryptoRng + ?Sized>(rng: &mut R, bit_size: usize) -> Result<Self> {
         rsa::PrivateKey::new(rng, bit_size)?.try_into()
@@ -244,7 +273,7 @@ impl From<&RsaKeypair> for RsaPublicKey {
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 impl TryFrom<RsaKeypair> for rsa::PrivateKey {
     type Error = Error;
 
@@ -253,7 +282,7 @@ impl TryFrom<RsaKeypair> for rsa::PrivateKey {
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 impl TryFrom<&RsaKeypair> for rsa::PrivateKey {
     type Error = Error;
 
@@ -272,7 +301,7 @@ impl TryFrom<&RsaKeypair> for rsa::PrivateKey {
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 impl TryFrom<rsa::PrivateKey> for RsaKeypair {
     type Error = Error;
 
@@ -281,7 +310,7 @@ impl TryFrom<rsa::PrivateKey> for RsaKeypair {
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 impl TryFrom<&rsa::PrivateKey> for RsaKeypair {
     type Error = Error;
 
@@ -308,7 +337,7 @@ impl TryFrom<&rsa::PrivateKey> for RsaKeypair {
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 impl<D> TryFrom<&RsaKeypair> for pkcs1v15::SigningKey<D>
 where
     D: Digest + AssociatedOid,

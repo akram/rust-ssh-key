@@ -247,7 +247,7 @@ impl From<encoding::bigint::DecodeError> for Error {
     }
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(all(feature = "rsa", not(feature = "openssl")))]
 impl From<rsa::errors::Error> for Error {
     fn from(_: rsa::errors::Error) -> Error {
         Error::Crypto

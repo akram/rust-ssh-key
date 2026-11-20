@@ -11,6 +11,7 @@ use core::str::FromStr;
 use hex::FromHex;
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
+#[cfg(not(feature = "openssl"))]
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
@@ -18,6 +19,59 @@ use crate::private::KeypairData;
 use crate::public::KeyData;
 use crate::{Algorithm, Error, PublicKey};
 use ctutils::CtEq;
+
+/// One-shot SHA-1 over the concatenation of `parts`, in order. PPK v2's own
+/// (legacy, pre-Argon2) key-derivation scheme, independent of the sign/
+/// verify backend choice, so it's still backend-selectable on its own.
+#[cfg(feature = "openssl")]
+fn sha1_digest(parts: &[&[u8]]) -> Vec<u8> {
+    use openssl::hash::{Hasher, MessageDigest};
+
+    #[allow(clippy::unwrap_used)] // a fixed, always-available digest
+    let mut hasher = Hasher::new(MessageDigest::sha1()).unwrap();
+    for part in parts {
+        #[allow(clippy::unwrap_used)]
+        hasher.update(part).unwrap();
+    }
+    #[allow(clippy::unwrap_used)]
+    hasher.finish().unwrap().to_vec()
+}
+
+#[cfg(not(feature = "openssl"))]
+fn sha1_digest(parts: &[&[u8]]) -> Vec<u8> {
+    let mut hash = Sha1::default();
+    for part in parts {
+        hash.update(part);
+    }
+    hash.finalize().to_vec()
+}
+
+/// One-shot HMAC-SHA1 over `data`, keyed by `key`. Same backend-selectable
+/// reasoning as `sha1_digest`: PPK v2's own file MAC, not a negotiated
+/// wire algorithm.
+#[cfg(feature = "openssl")]
+fn hmac_sha1(key: &[u8], data: &[u8]) -> Vec<u8> {
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::sign::Signer;
+
+    #[allow(clippy::unwrap_used)] // HMAC accepts any key length
+    let pkey = PKey::hmac(key).unwrap();
+    #[allow(clippy::unwrap_used)]
+    let mut signer = Signer::new(MessageDigest::sha1(), &pkey).unwrap();
+    #[allow(clippy::unwrap_used)]
+    signer.update(data).unwrap();
+    #[allow(clippy::unwrap_used)]
+    signer.sign_to_vec().unwrap()
+}
+
+#[cfg(not(feature = "openssl"))]
+fn hmac_sha1(key: &[u8], data: &[u8]) -> Vec<u8> {
+    #[allow(clippy::unwrap_used)] // HMAC accepts any key length
+    let mut hmac = Hmac::<Sha1>::new_from_slice(key).unwrap();
+    hmac.update(data);
+    hmac.finalize().into_bytes().to_vec()
+}
 use encoding::base64::{self, Base64, Encoding};
 use encoding::{Decode, Encode, LabelError, Reader};
 
@@ -110,30 +164,14 @@ impl Cipher {
                 ))
             }
             Kdf::PpkV2 => {
-                let mut hashes = {
-                    let mut hash = Sha1::default();
-                    hash.update([0, 0, 0, 0]);
-                    hash.update(password.as_bytes());
-                    hash.finalize().to_vec()
-                };
-                hashes.extend_from_slice(&{
-                    let mut hash = Sha1::default();
-                    hash.update([0, 0, 0, 1]);
-                    hash.update(password.as_bytes());
-                    hash.finalize()
-                });
+                let mut hashes = sha1_digest(&[&[0, 0, 0, 0], password.as_bytes()]);
+                hashes.extend_from_slice(&sha1_digest(&[&[0, 0, 0, 1], password.as_bytes()]));
 
                 #[allow(clippy::unwrap_used)] // known size
                 let aes_key = hashes[..32].try_into().unwrap();
                 let iv = [0; 16];
 
-                let mac_key = {
-                    let mut hash = Sha1::default();
-                    hash.update(PPK_V2_MAC_PREFIX.as_bytes());
-                    hash.update(password.as_bytes());
-                    hash.finalize()
-                }
-                .to_vec();
+                let mac_key = sha1_digest(&[PPK_V2_MAC_PREFIX.as_bytes(), password.as_bytes()]);
 
                 Ok((aes_key, iv, mac_key))
             }
@@ -409,11 +447,7 @@ impl PpkContainer {
 
         let hmac_key = match &encryption {
             None => match ppk.version {
-                2 => {
-                    let mut hash = Sha1::new();
-                    hash.update(PPK_V2_MAC_PREFIX.as_bytes());
-                    hash.finalize().to_vec()
-                }
+                2 => sha1_digest(&[PPK_V2_MAC_PREFIX.as_bytes()]),
                 3 => HmacKey::default(),
                 _ => unreachable!(),
             },
@@ -428,11 +462,7 @@ impl PpkContainer {
                     hmac.update(&mac_buffer);
                     hmac.finalize().into_bytes().to_vec()
                 }
-                2 => {
-                    let mut hmac = Hmac::<Sha1>::new_from_slice(&hmac_key).unwrap();
-                    hmac.update(&mac_buffer);
-                    hmac.finalize().into_bytes().to_vec()
-                }
+                2 => hmac_sha1(&hmac_key, &mac_buffer),
                 _ => unreachable!(),
             }
         };

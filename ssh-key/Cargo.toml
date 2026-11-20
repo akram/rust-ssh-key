@@ -80,7 +80,12 @@ aes-rust-crypto = ["cipher/aes-rust-crypto"]
 p256 = ["dep:p256", "ecdsa"]
 p384 = ["dep:p384", "ecdsa"]
 p521 = ["dep:p521", "ecdsa"]
-ppk = ["dep:hex", "alloc", "cipher/aes", "dep:hmac", "dep:argon2", "dep:sha1"]
+## PPK v2's own legacy KDF/file-MAC uses SHA-1 independent of the
+## sign/verify backend choice (see ppk.rs); the `openssl` feature below
+## routes it through OpenSSL instead, so `ppk` itself no longer forwards
+## `dep:sha1` directly. A consumer not using `openssl` must separately
+## request the `sha1` feature below for the RustCrypto backend.
+ppk = ["dep:hex", "alloc", "cipher/aes", "dep:hmac", "dep:argon2"]
 rand_core = ["dep:rand_core", "cipher/rand_core"]
 # Backend-agnostic: RSA key *type* support (Mpint-based storage, no
 # RustCrypto `rsa` crate needed for that by itself). `rsa-rust-crypto`

@@ -69,8 +69,14 @@ getrandom = ["cipher/getrandom", "rand_core"]
 # that require all cryptographic operations to go through a FIPS-certifiable
 # OpenSSL build. Pulls in `ecdsa` for the EcdsaKeypair/EcdsaPublicKey types
 # (Ed25519's and RSA's equivalents are not feature-gated); this only swaps
-# the signing/verification backend, not key storage/encoding.
-openssl = ["dep:openssl", "std", "ecdsa"]
+# the signing/verification backend, not key storage/encoding. Also routes
+# `encryption`/`ppk`'s AES-CBC/CTR/GCM (ssh-cipher's `aes` marker) through
+# OpenSSL instead of RustCrypto.
+openssl = ["dep:openssl", "std", "ecdsa", "cipher/openssl"]
+# Explicit opt-in for ssh-cipher's RustCrypto AES-CBC/CTR/GCM backend, not
+# implied by `encryption`/`ppk` alone -- a consumer picks this when it
+# wants that backend (as opposed to `openssl`, above). See RHOAIENG-97009.
+aes-rust-crypto = ["cipher/aes-rust-crypto"]
 p256 = ["dep:p256", "ecdsa"]
 p384 = ["dep:p384", "ecdsa"]
 p521 = ["dep:p521", "ecdsa"]

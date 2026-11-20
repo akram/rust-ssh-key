@@ -6,38 +6,40 @@
     html_favicon_url = "https://raw.githubusercontent.com/RustCrypto/media/6ee8e381/logo.svg"
 )]
 
-#[cfg(any(feature = "aes", feature = "tdes"))]
+#[cfg(any(feature = "aes-rust-crypto", feature = "tdes"))]
 pub mod block_cipher;
 
 #[cfg(feature = "chacha20poly1305")]
 mod chacha20poly1305;
 mod error;
+#[cfg(all(feature = "aes", feature = "openssl"))]
+mod openssl_aes;
 
 pub use crate::error::{Error, Result};
 pub use cipher;
 
 #[cfg(feature = "chacha20poly1305")]
 pub use crate::chacha20poly1305::{ChaCha20, ChaCha20Poly1305, ChaChaKey, ChaChaNonce};
-#[cfg(any(feature = "aes", feature = "chacha20poly1305"))]
+#[cfg(any(feature = "aes-rust-crypto", feature = "chacha20poly1305"))]
 pub use aead;
 
 use cipher::array::{Array, typenum::U16};
 use core::{fmt, str};
 
-#[cfg(feature = "aes")]
+#[cfg(feature = "aes-rust-crypto")]
 use self::block_cipher::Aes;
 #[cfg(feature = "tdes")]
 use self::block_cipher::Tdes;
-#[cfg(any(feature = "aes", feature = "chacha20poly1305"))]
+#[cfg(any(feature = "aes-rust-crypto", feature = "chacha20poly1305"))]
 use ::aead::{AeadInOut, KeyInit};
 #[cfg(feature = "encoding")]
 use encoding::{Label, LabelError};
-#[cfg(any(feature = "aes", feature = "tdes"))]
+#[cfg(any(feature = "aes-rust-crypto", feature = "tdes"))]
 use {
     self::block_cipher::{BlockMode, sealed::BlockCipher},
     ::cipher::{Block, BlockModeDecrypt, BlockModeEncrypt},
 };
-#[cfg(feature = "aes")]
+#[cfg(feature = "aes-rust-crypto")]
 use {
     aead::array::typenum::U12,
     aes_gcm::{Aes128Gcm, Aes256Gcm},
@@ -69,7 +71,7 @@ const CHACHA20_POLY1305: &str = "chacha20-poly1305@openssh.com";
 const TDES_CBC: &str = "3des-cbc";
 
 /// Nonce for `aes128-gcm@openssh.com`/`aes256-gcm@openssh.com`.
-#[cfg(feature = "aes")]
+#[cfg(feature = "aes-rust-crypto")]
 pub type AesGcmNonce = Array<u8, U12>;
 
 /// Authentication tag for ciphertext data.
@@ -264,10 +266,15 @@ impl Cipher {
     /// # Errors
     /// Returns [`Error::Length`] in the event that `buffer` is not a multiple of the cipher's
     /// block size.
-    #[cfg_attr(not(any(feature = "aes", feature = "tdes")), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "aes-rust-crypto", feature = "tdes", feature = "openssl")),
+        allow(unused_variables)
+    )]
     pub fn decrypt(self, key: &[u8], iv: &[u8], buffer: &mut [u8], tag: Option<Tag>) -> Result<()> {
         match self {
-            #[cfg(feature = "aes")]
+            #[cfg(all(feature = "aes", feature = "openssl"))]
+            Self::Aes128Gcm | Self::Aes256Gcm => openssl_aes::decrypt_aead(self, key, iv, buffer, tag),
+            #[cfg(all(feature = "aes-rust-crypto", not(feature = "openssl")))]
             Self::Aes128Gcm => {
                 let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| Error::KeySize)?;
                 let nonce = iv.try_into().map_err(|_| Error::IvSize)?;
@@ -278,7 +285,7 @@ impl Cipher {
 
                 Ok(())
             }
-            #[cfg(feature = "aes")]
+            #[cfg(all(feature = "aes-rust-crypto", not(feature = "openssl")))]
             Self::Aes256Gcm => {
                 let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::KeySize)?;
                 let nonce = iv.try_into().map_err(|_| Error::IvSize)?;
@@ -298,7 +305,19 @@ impl Cipher {
                     .decrypt_inout_detached(nonce, &[], buffer.into(), &tag)
                     .map_err(|_| Error::Crypto)
             }
-            #[cfg(feature = "aes")]
+            #[cfg(all(feature = "aes", feature = "openssl"))]
+            Self::Aes128Cbc
+            | Self::Aes192Cbc
+            | Self::Aes256Cbc
+            | Self::Aes128Ctr
+            | Self::Aes192Ctr
+            | Self::Aes256Ctr => {
+                if tag.is_some() {
+                    return Err(Error::Crypto);
+                }
+                openssl_aes::decrypt_block(self, key, iv, buffer)
+            }
+            #[cfg(all(feature = "aes-rust-crypto", not(feature = "openssl")))]
             Self::Aes128Cbc
             | Self::Aes192Cbc
             | Self::Aes256Cbc
@@ -366,10 +385,17 @@ impl Cipher {
     /// # Errors
     /// Returns [`Error::Length`] in the event that `buffer` is not a multiple of the cipher's
     /// block size.
-    #[cfg_attr(not(any(feature = "aes", feature = "tdes")), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(feature = "aes-rust-crypto", feature = "tdes", feature = "openssl")),
+        allow(unused_variables)
+    )]
     pub fn encrypt(self, key: &[u8], iv: &[u8], buffer: &mut [u8]) -> Result<Option<Tag>> {
         match self {
-            #[cfg(feature = "aes")]
+            #[cfg(all(feature = "aes", feature = "openssl"))]
+            Self::Aes128Gcm | Self::Aes256Gcm => {
+                openssl_aes::encrypt_aead(self, key, iv, buffer).map(Some)
+            }
+            #[cfg(all(feature = "aes-rust-crypto", not(feature = "openssl")))]
             Self::Aes128Gcm => {
                 let cipher = Aes128Gcm::new_from_slice(key).map_err(|_| Error::KeySize)?;
                 let nonce = iv.try_into().map_err(|_| Error::IvSize)?;
@@ -379,7 +405,7 @@ impl Cipher {
 
                 Ok(Some(tag))
             }
-            #[cfg(feature = "aes")]
+            #[cfg(all(feature = "aes-rust-crypto", not(feature = "openssl")))]
             Self::Aes256Gcm => {
                 let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::KeySize)?;
                 let nonce = iv.try_into().map_err(|_| Error::IvSize)?;
@@ -398,7 +424,17 @@ impl Cipher {
                     .map_err(|_| Error::Crypto)?;
                 Ok(Some(tag))
             }
-            #[cfg(feature = "aes")]
+            #[cfg(all(feature = "aes", feature = "openssl"))]
+            Self::Aes128Cbc
+            | Self::Aes192Cbc
+            | Self::Aes256Cbc
+            | Self::Aes128Ctr
+            | Self::Aes192Ctr
+            | Self::Aes256Ctr => {
+                openssl_aes::encrypt_block(self, key, iv, buffer)?;
+                Ok(None)
+            }
+            #[cfg(all(feature = "aes-rust-crypto", not(feature = "openssl")))]
             Self::Aes128Cbc
             | Self::Aes192Cbc
             | Self::Aes256Cbc

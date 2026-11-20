@@ -28,6 +28,7 @@ ctutils = { version = "0.4.8", optional = true, default-features = false }
 chacha20 = { version = "0.10", optional = true, default-features = false, features = ["cipher", "legacy"] }
 des = { version = "0.9", optional = true, default-features = false }
 encoding = { package = "ssh-encoding", version = "0.3", optional = true }
+openssl = { version = "0.10", optional = true, default-features = false }
 poly1305 = { version = "0.9", optional = true, default-features = false }
 zeroize = { version = "1", optional = true, default-features = false }
 
@@ -35,7 +36,15 @@ zeroize = { version = "1", optional = true, default-features = false }
 hex-literal = "1"
 
 [features]
-aes = ["dep:aead", "dep:aes", "dep:aes-gcm"]
+# AES-based ciphers (CBC, CTR, GCM): backend-agnostic marker. `openssl`
+# below swaps in system OpenSSL for all of them; without it, a consumer
+# must separately request `aes-rust-crypto` for the RustCrypto backend
+# (not implied by `aes` alone, so an openssl-only build doesn't compile
+# in aes/aes-gcm just because some encryption feature wants AES ciphers
+# in general). See RHOAIENG-97009.
+aes = ["dep:aead"]
+aes-rust-crypto = ["aes", "dep:aes", "dep:aes-gcm"]
+openssl = ["dep:openssl"]
 chacha20poly1305 = ["dep:aead", "dep:chacha20", "dep:poly1305", "dep:ctutils"]
 encoding = ["dep:encoding"]
 getrandom = ["rand_core", "aead?/getrandom", "cipher/getrandom"]

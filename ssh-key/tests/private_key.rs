@@ -559,7 +559,7 @@ fn decode_rsa_4096_openssh() {
     assert_eq!(b"user@example.com", key.comment().as_bytes());
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(feature = "rsa-rust-crypto")]
 #[test]
 fn round_trip_rsa_3072() {
     let private_key = PrivateKey::from_openssh(OPENSSH_RSA_3072_EXAMPLE).unwrap();

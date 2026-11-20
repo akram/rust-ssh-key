@@ -618,7 +618,7 @@ impl PrivateKey {
             Algorithm::Ecdsa { curve } => KeypairData::from(EcdsaKeypair::random(rng, curve)?),
             #[cfg(any(feature = "ed25519", feature = "openssl"))]
             Algorithm::Ed25519 => KeypairData::from(Ed25519Keypair::random(rng)),
-            #[cfg(feature = "rsa")]
+            #[cfg(any(all(feature = "rsa", feature = "openssl"), feature = "rsa-rust-crypto"))]
             Algorithm::Rsa { .. } => {
                 KeypairData::from(RsaKeypair::random(rng, DEFAULT_RSA_KEY_SIZE)?)
             }

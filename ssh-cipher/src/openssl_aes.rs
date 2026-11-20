@@ -4,10 +4,20 @@
 //! `Cipher::encrypt`/`decrypt` contract -- unlike SSH *packet* encryption,
 //! OpenSSH private-key-file and PPK encryption never spans more than one
 //! call, so there is no cross-call IV/counter state to carry here.
+//!
+//! This crate is `no_std` with no `alloc` dependency, so unlike the
+//! `openssl::symm::{encrypt,decrypt,encrypt_aead,decrypt_aead}` convenience
+//! functions (which allocate a `Vec`), everything here is processed through
+//! a fixed-size stack scratch buffer, chunk by chunk.
 
 use openssl::symm::{Cipher as OsslCipher, Crypter, Mode};
 
 use crate::{Cipher, Error, Result, Tag};
+
+/// Chunk size for `Crypter::update` calls; an arbitrary multiple of the AES
+/// block size (16), small enough to live on the stack, large enough that a
+/// typical key blob (at most a few KiB) needs only a handful of calls.
+const CHUNK: usize = 256;
 
 fn ossl_cbc_cipher(cipher: Cipher) -> Result<OsslCipher> {
     match cipher {
@@ -29,19 +39,30 @@ fn ossl_gcm_cipher(cipher: Cipher) -> Result<OsslCipher> {
     }
 }
 
-/// One-shot, no-padding block transform; `buffer.len()` must already be a
-/// multiple of the block size (this crate's own RustCrypto path shares the
-/// same precondition -- see `decrypt_with_block_cipher`'s doc comment).
-fn crypt_no_pad(cipher: OsslCipher, mode: Mode, key: &[u8], iv: &[u8], buffer: &mut [u8]) -> Result<()> {
-    let mut crypter = Crypter::new(cipher, mode, key, Some(iv)).map_err(|_| Error::Crypto)?;
-    crypter.pad(false);
-    let mut out = vec![0u8; buffer.len() + 16];
-    let n = crypter.update(buffer, &mut out).map_err(|_| Error::Crypto)?;
-    let n2 = crypter.finalize(&mut out[n..]).map_err(|_| Error::Crypto)?;
-    if n + n2 != buffer.len() {
+/// Feeds `buffer` through `crypter` in fixed-size chunks, overwriting it
+/// in place with the result. Each chunk's `update()` call is expected to
+/// emit exactly as many bytes as it was fed -- true for a no-padding block
+/// transform fed block-aligned input, and for a stream/AEAD cipher fed any
+/// input -- so a mismatch is treated as a hard error rather than buffered.
+fn process_in_place(crypter: &mut Crypter, buffer: &mut [u8]) -> Result<()> {
+    let mut scratch = [0u8; CHUNK + 32];
+    let mut pos = 0;
+    while pos < buffer.len() {
+        let end = (pos + CHUNK).min(buffer.len());
+        let n = crypter
+            .update(&buffer[pos..end], &mut scratch)
+            .map_err(|_| Error::Crypto)?;
+        if n != end - pos {
+            return Err(Error::Crypto);
+        }
+        buffer[pos..end].copy_from_slice(&scratch[..n]);
+        pos = end;
+    }
+    let mut tail = [0u8; 32];
+    let n = crypter.finalize(&mut tail).map_err(|_| Error::Crypto)?;
+    if n != 0 {
         return Err(Error::Crypto);
     }
-    buffer.copy_from_slice(&out[..n + n2]);
     Ok(())
 }
 
@@ -49,14 +70,20 @@ pub(crate) fn decrypt_block(cipher: Cipher, key: &[u8], iv: &[u8], buffer: &mut 
     if buffer.len() % cipher.block_size() != 0 {
         return Err(Error::Length);
     }
-    crypt_no_pad(ossl_cbc_cipher(cipher)?, Mode::Decrypt, key, iv, buffer)
+    let mut crypter =
+        Crypter::new(ossl_cbc_cipher(cipher)?, Mode::Decrypt, key, Some(iv)).map_err(|_| Error::Crypto)?;
+    crypter.pad(false);
+    process_in_place(&mut crypter, buffer)
 }
 
 pub(crate) fn encrypt_block(cipher: Cipher, key: &[u8], iv: &[u8], buffer: &mut [u8]) -> Result<()> {
     if buffer.len() % cipher.block_size() != 0 {
         return Err(Error::Length);
     }
-    crypt_no_pad(ossl_cbc_cipher(cipher)?, Mode::Encrypt, key, iv, buffer)
+    let mut crypter =
+        Crypter::new(ossl_cbc_cipher(cipher)?, Mode::Encrypt, key, Some(iv)).map_err(|_| Error::Crypto)?;
+    crypter.pad(false);
+    process_in_place(&mut crypter, buffer)
 }
 
 pub(crate) fn decrypt_aead(
@@ -67,29 +94,54 @@ pub(crate) fn decrypt_aead(
     tag: Option<Tag>,
 ) -> Result<()> {
     let tag = tag.ok_or(Error::TagSize)?;
-    let plaintext = openssl::symm::decrypt_aead(ossl_gcm_cipher(cipher)?, key, Some(iv), &[], buffer, &tag)
-        .map_err(|_| Error::Crypto)?;
-    if plaintext.len() != buffer.len() {
+    let mut crypter =
+        Crypter::new(ossl_gcm_cipher(cipher)?, Mode::Decrypt, key, Some(iv)).map_err(|_| Error::Crypto)?;
+    crypter.aad_update(&[]).map_err(|_| Error::Crypto)?;
+    let mut scratch = [0u8; CHUNK + 32];
+    let mut pos = 0;
+    while pos < buffer.len() {
+        let end = (pos + CHUNK).min(buffer.len());
+        let n = crypter
+            .update(&buffer[pos..end], &mut scratch)
+            .map_err(|_| Error::Crypto)?;
+        if n != end - pos {
+            return Err(Error::Crypto);
+        }
+        buffer[pos..end].copy_from_slice(&scratch[..n]);
+        pos = end;
+    }
+    crypter.set_tag(&tag).map_err(|_| Error::Crypto)?;
+    let mut tail = [0u8; 32];
+    let n = crypter.finalize(&mut tail).map_err(|_| Error::Crypto)?;
+    if n != 0 {
         return Err(Error::Crypto);
     }
-    buffer.copy_from_slice(&plaintext);
     Ok(())
 }
 
 pub(crate) fn encrypt_aead(cipher: Cipher, key: &[u8], iv: &[u8], buffer: &mut [u8]) -> Result<Tag> {
-    let mut tag_buf = [0u8; 16];
-    let ciphertext = openssl::symm::encrypt_aead(
-        ossl_gcm_cipher(cipher)?,
-        key,
-        Some(iv),
-        &[],
-        buffer,
-        &mut tag_buf,
-    )
-    .map_err(|_| Error::Crypto)?;
-    if ciphertext.len() != buffer.len() {
+    let mut crypter =
+        Crypter::new(ossl_gcm_cipher(cipher)?, Mode::Encrypt, key, Some(iv)).map_err(|_| Error::Crypto)?;
+    crypter.aad_update(&[]).map_err(|_| Error::Crypto)?;
+    let mut scratch = [0u8; CHUNK + 32];
+    let mut pos = 0;
+    while pos < buffer.len() {
+        let end = (pos + CHUNK).min(buffer.len());
+        let n = crypter
+            .update(&buffer[pos..end], &mut scratch)
+            .map_err(|_| Error::Crypto)?;
+        if n != end - pos {
+            return Err(Error::Crypto);
+        }
+        buffer[pos..end].copy_from_slice(&scratch[..n]);
+        pos = end;
+    }
+    let mut tail = [0u8; 32];
+    let n = crypter.finalize(&mut tail).map_err(|_| Error::Crypto)?;
+    if n != 0 {
         return Err(Error::Crypto);
     }
-    buffer.copy_from_slice(&ciphertext);
+    let mut tag_buf = [0u8; 16];
+    crypter.get_tag(&mut tag_buf).map_err(|_| Error::Crypto)?;
     Ok(Tag::from(tag_buf))
 }
